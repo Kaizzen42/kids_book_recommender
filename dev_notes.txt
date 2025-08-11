@@ -1,0 +1,33 @@
+1. Get the movie database: downloaded from ucsd: https://cseweb.ucsd.edu/~jmcauley/datasets/goodreads.html 
+2. Generate embeddings for every movie, using Sentence Transformers from Hugging Face
+3. Build a similarity engine, and use a CLI to test it. 
+
+
+Difficulties:
+1. Which dataset can I use?
+Looked through a few results from google, and found that there were a handful of datasets that had no citations or upvotes or validation of any kind.
+Found a reddit post that linked me to a nice books dataset: https://www.reddit.com/r/datasets/comments/sa9vuu/goodreads_book_reviews_dataset_10_million_books_6/
+
+2. How do I get the data?
+Visited the UCSD website, and picked the kids genre to use for my kids. 
+Downloaded a few large zipped files first. 
+
+3. Loading a large dataset.
+Despite picking just one genre, the dataset was taking more than 2 minutes to load. 
+So I peeked into the json files, and found that every row was an independent json record.
+Sampled 10k books, 100k reviews and 1M interactions, and put them in a different folder.
+I was able to load these up in about 24 seconds.
+
+4. JSON formatting.
+My expectation was for files to be in valid json format, but they were independent records.
+Using lines=True as a parameter in read json in pandas helped.
+
+5. While exploring the data, I looked for a book I remembered fondly as a kind: "The Enchanted Wood" By Enid Blyton. I realized that the dataset did not have it. 
+The author search was not useful because it only contained ids, not names. 
+So I found the title by partial keyword match, but it had no other info. Searching on goodreads showed me the book. So the dataset is a bit incomplete.
+My workaround is to look for the most popular books. This is likely because of sampling. OKAY, THAT WAS IT!
+FIXED: I removed all the interaction data, making the dataset size just 1GB overall. Now it contains all books and all reviews.
+
+6. Finding the most popular books.
+Going by average rating, I found a few books, but it could have been just a single rating. I need the number of ratings.
+Joining on the reviews dataframe 

@@ -1,0 +1,5 @@
+.DS_Store
+.venv/
+data/
+goodreads_interactions_children.json
+trace.txt
