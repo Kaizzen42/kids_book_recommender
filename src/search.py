@@ -101,24 +101,191 @@ def seed_vectors_by_row(data: dict, row: int) -> dict:
         "reviews": data["reviews"][row],
     }
 
+# ---------- Metadata features ----------
+def _minmax(x: np.ndarray) -> np.ndarray:
+    x = x.astype(float)
+    lo, hi = np.nanmin(x), np.nanmax(x)
+    if hi <= lo:
+        return np.zeros_like(x)
+    return (x - lo) / (hi - lo)
+
+def _log1p_minmax(x: np.ndarray) -> np.ndarray:
+    return _minmax(np.log1p(x.astype(float)))
+
+def build_meta_features(meta: pd.DataFrame) -> dict:
+    year     = meta["publication_year"].fillna(meta["publication_year"].median()).to_numpy()
+    rating   = meta["average_rating"].fillna(meta["average_rating"].median()).to_numpy()
+    n_votes  = meta["sum_n_votes"].fillna(0).to_numpy()
+
+    recency  = _minmax(year)            # newer → closer to 1
+    quality  = _minmax(rating)          # higher rating → closer to 1
+    popularity = _log1p_minmax(n_votes) # diminishing returns
+
+    return {"recency": recency, "quality": quality, "popularity": popularity}
+
+# ---------- Intent heuristics ----------
+def intent_to_params(intent_text: str | None) -> dict:
+    """
+    Very light keyword mapping.
+    Returns: dict with keys:
+      - weights: (w_title, w_desc, w_rev)
+      - year_min/year_max/min_votes/min_rating (optional)
+      - boosts: dict(alpha_recency, beta_popularity, gamma_quality)
+    """
+    intent = (intent_text or "").casefold()
+
+    # defaults
+    params = {
+        "weights": (0.50, 0.35, 0.15),  # title, description, reviews
+        "boosts": {"alpha_recency": 0.05, "beta_popularity": 0.10, "gamma_quality": 0.08},
+    }
+
+    # Weight nudges
+    if any(k in intent for k in ["plot", "story", "theme", "genre", "synopsis", "like this book"]):
+        params["weights"] = (0.30, 0.55, 0.15)
+    if any(k in intent for k in ["writing", "style", "voice", "tone", "prose"]):
+        params["weights"] = (0.20, 0.35, 0.45)
+    if any(k in intent for k in ["series", "title", "name", "sequel"]):
+        params["weights"] = (0.60, 0.30, 0.10)
+
+    # Filters
+    if "recent" in intent or "new" in intent or "latest" in intent:
+        params["year_min"] = 2018
+        params["boosts"]["alpha_recency"] = 0.10
+    if "classic" in intent or "older" in intent or "before" in intent:
+        params["year_max"] = 2005
+        params["boosts"]["alpha_recency"] = 0.00  # don't boost recency
+
+    if any(k in intent for k in ["popular", "bestseller", "widely read", "trending"]):
+        params["min_votes"] = 1000
+        params["boosts"]["beta_popularity"] = 0.15
+
+    if any(k in intent for k in ["highly rated", "well rated", "quality"]):
+        params["min_rating"] = 4.0
+        params["boosts"]["gamma_quality"] = 0.12
+
+    return params
+
+# ---------- Core scoring ----------
+def weighted_similarity_from_row(row: int, data: dict, weights: tuple[float, float, float]) -> np.ndarray:
+    """
+    Blend similarities from the three embedding spaces using the seed book at `row`.
+    All embeddings were saved unit-normalized, so cosine = dot.
+    """
+    w_title, w_desc, w_rev = weights
+    q_title = data["title"][row]        # (dim,)
+    q_desc  = data["description"][row]
+    q_rev   = data["reviews"][row]
+
+    sim = (
+        w_title * (data["title"] @ q_title) +
+        w_desc  * (data["description"] @ q_desc) +
+        w_rev   * (data["reviews"] @ q_rev)
+    )
+    return sim  # (N,)
+
+def apply_filters(meta: pd.DataFrame,
+                  year_min: int | None = None,
+                  year_max: int | None = None,
+                  min_votes: int | None = None,
+                  min_rating: float | None = None) -> np.ndarray:
+    mask = np.ones(len(meta), dtype=bool)
+    if year_min is not None:
+        mask &= (meta["publication_year"] >= year_min)
+    if year_max is not None:
+        mask &= (meta["publication_year"] <= year_max)
+    if min_votes is not None:
+        mask &= (meta["sum_n_votes"] >= min_votes)
+    if min_rating is not None:
+        mask &= (meta["average_rating"] >= min_rating)
+    return mask
+
+def hybrid_score(sim: np.ndarray, meta_feats: dict,
+                 alpha_recency=0.05, beta_popularity=0.10, gamma_quality=0.08) -> np.ndarray:
+    """
+    final = sim + α*recency + β*popularity + γ*quality
+    """
+    return (sim
+            + alpha_recency * meta_feats["recency"]
+            + beta_popularity * meta_feats["popularity"]
+            + gamma_quality * meta_feats["quality"])
+
+# ---------- Public API ----------
+def find_similar_books(
+    query_title: str,
+    intent_text: str = "",
+    k: int = 20,
+    weights: tuple[float, float, float] | None = None,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    min_votes: int | None = None,
+    min_rating: float | None = None,
+    exclude_self: bool = True,
+):
+    data = load_vectors_and_meta()
+    meta = data["meta"].reset_index(drop=False)  # keep original row index as 'index'
+    meta.rename(columns={"index": "_row"}, inplace=True)
+
+    # Resolve the seed book row (row is the original index used by npy files)
+    row = resolve_book_by_title(data["meta"], query_title)
+
+    # Intent defaults and merges
+    intent_params = intent_to_params(intent_text)
+    if weights is None:
+        weights = intent_params["weights"]
+
+    # Merge optional filters: explicit args win over intent-derived
+    y_min = year_min if year_min is not None else intent_params.get("year_min")
+    y_max = year_max if year_max is not None else intent_params.get("year_max")
+    v_min = min_votes if min_votes is not None else intent_params.get("min_votes")
+    r_min = min_rating if min_rating is not None else intent_params.get("min_rating")
+
+    # Compute similarities
+    sim = weighted_similarity_from_row(row, data, weights)  # (N,)
+
+    # Build metadata features & boosts
+    feats = build_meta_features(data["meta"])
+    boosts = intent_params["boosts"]
+    final = hybrid_score(sim, feats,
+                         alpha_recency=boosts["alpha_recency"],
+                         beta_popularity=boosts["beta_popularity"],
+                         gamma_quality=boosts["gamma_quality"])
+
+    # Apply filters
+    mask = apply_filters(data["meta"], year_min=y_min, year_max=y_max, min_votes=v_min, min_rating=r_min)
+    if exclude_self:
+        mask[row] = False
+
+    # Top-k
+    idx = np.argwhere(mask).ravel()
+    top_idx = idx[np.argsort(final[idx])[::-1][:k]]
+
+    # Build result frame
+    out = data["meta"].iloc[top_idx].copy()
+    out["score"] = final[top_idx]
+    out["similarity"] = sim[top_idx]
+    out = out[["book_id", "title", "score", "similarity", "average_rating", "publication_year", "n_reviews", "sum_n_votes"]]
+    return out.reset_index(drop=True)
+
 if __name__ == "__main__":
     data = load_vectors_and_meta()
-    print("Loaded:")
-    print("  n:", data["n"])
-    print("  dim:", data["dim"])
-    print("  title:", data["title"].shape)
-    print("  description:", data["description"].shape)
-    print("  reviews:", data["reviews"].shape)
-    print("  meta cols:", list(data["meta"].columns))
+    print("Loaded OK:", data["n"], "rows,", data["dim"], "dim")
 
-    # Smoke test: try resolving a common word from your corpus, e.g., "Harry Potter"
     try:
-        row = resolve_book_by_title(data["meta"], "Harry Potter")
-        vecs = seed_vectors_by_row(data, row)
-        print("Resolved row:", row, "title:", data["meta"].loc[row, "title"])
-        print("Vec norms (should be ~1.0):",
-              np.linalg.norm(vecs["title"]),
-              np.linalg.norm(vecs["description"]),
-              np.linalg.norm(vecs["reviews"]))
+        # Example 1: default intent
+        res = find_similar_books("Harry Potter", intent_text="", k=10)
+        print("\nTop-10 (default):")
+        print(res.head(10).to_string(index=False))
+
+        # Example 2: “similar plot/theme”
+        res2 = find_similar_books("Harry Potter", intent_text="similar plot and theme, popular, highly rated", k=10)
+        print("\nTop-10 (plot/theme + popularity + quality):")
+        print(res2.head(10).to_string(index=False))
+
+        # Example 3: “similar writing style”
+        res3 = find_similar_books("Harry Potter", intent_text="similar writing style / voice, recent", k=10, year_min=2010)
+        print("\nTop-10 (style + recent):")
+        print(res3.head(10).to_string(index=False))
+
     except Exception as e:
-        print("Lookup test:", e)
+        print("Search test error:", e)
