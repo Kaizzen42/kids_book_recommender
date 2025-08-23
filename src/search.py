@@ -346,23 +346,64 @@ def find_similar_books(
 
     # Rank all passing candidates
     idx = np.argwhere(mask).ravel()
-    ranked = idx[np.argsort(final[idx])[::-1]]   # descending by score
+    if idx.size == 0:
+        # No hits after filters → return empty frame with expected columns
+        return pd.DataFrame(columns=[
+            "book_id","title","score","similarity",
+            "average_rating","publication_year","n_reviews","sum_n_votes"
+        ])
 
-    # Over-fetch to have room after dedup
-    overfetch = ranked[: max(200, 10*k)]
+    ranked = idx[np.argsort(final[idx])[::-1]]          # descending
+    overfetch = ranked[: max(200, 10 * k)]              # room for dedup
 
-    # Keep first occurrence per canonical title
-    unique_top = select_unique_by_key(
-        data["meta"], overfetch, key_fn=canonical_title, k=k
-    )
+    # Title-level dedup
+    unique_top = select_unique_by_key(data["meta"], overfetch, key_fn=canonical_title, k=k)
+    if len(unique_top) == 0:
+        return pd.DataFrame(columns=[
+            "book_id","title","score","similarity",
+            "average_rating","publication_year","n_reviews","sum_n_votes"
+        ])
 
+    # Build result frame (create columns BEFORE sanitizing)
     out = data["meta"].iloc[unique_top].copy()
-    out["score"] = final[unique_top]
-    out["similarity"] = sim[unique_top]
-    
-    out = out[["book_id", "title", "score", "similarity", "average_rating", "publication_year", "n_reviews", "sum_n_votes"]]
+
+    scores = final[unique_top]
+    sims   = sim[unique_top]
+
+    # assign explicitly (loc avoids pandas warnings)
+    out.loc[:, "score"] = scores
+    out.loc[:, "similarity"] = sims
+
+    # reorder columns
+    out = out[[
+        "book_id","title","score","similarity",
+        "average_rating","publication_year","n_reviews","sum_n_votes"
+    ]]
+
+    # ---- sanitize numeric columns (avoid NaN/Inf for JSON) ----
+    for col in ("score", "similarity", "average_rating", "publication_year", "n_reviews", "sum_n_votes"):
+        if col in out.columns:
+            out[col] = np.nan_to_num(out[col].to_numpy(dtype=float), nan=0.0, posinf=1.0, neginf=-1.0)
+
     return out.reset_index(drop=True)
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ # ------------- RUN ----------------
 if __name__ == "__main__":
     data = load_vectors_and_meta()
     print("Loaded OK:", data["n"], "rows,", data["dim"], "dim")
