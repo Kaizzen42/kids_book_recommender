@@ -3,6 +3,11 @@ import os, time, sys
 import numpy as np
 import pandas as pd
 
+import re
+import unicodedata
+from typing import Callable, Iterable, List
+
+
 def project_root():
     # adjust if your layout differs
     here = os.path.dirname(os.path.abspath(__file__))
@@ -100,6 +105,59 @@ def seed_vectors_by_row(data: dict, row: int) -> dict:
         "description": data["description"][row],
         "reviews": data["reviews"][row],
     }
+
+_punct_re = re.compile(r"[\W_]+", re.UNICODE)
+_paren_re = re.compile(r"\([^)]*\)")       # remove (...) such as (Harry Potter, #3), (2012 ed.)
+_series_hash_re = re.compile(r"#\s*\d+")
+_multi_space_re = re.compile(r"\s+")
+
+def _strip_accents(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+def canonical_title(title: str) -> str:
+    """
+    Normalize visually identical titles (across editions) to the same key.
+    Heuristics:
+      - lowercase, strip accents
+      - remove parenthetical tags (...), e.g., (Harry Potter, #3)
+      - remove '#3' style series numbers
+      - keep portion before ':' (often drops edition subtitles)
+      - strip punctuation & collapse spaces
+    """
+    if not isinstance(title, str):
+        title = "" if title is None else str(title)
+    s = _strip_accents(title.casefold().strip())
+    s = _paren_re.sub(" ", s)
+    s = _series_hash_re.sub(" ", s)
+    if ":" in s:
+        s = s.split(":", 1)[0]
+    s = _punct_re.sub(" ", s)
+    s = _multi_space_re.sub(" ", s)
+    return s.strip()
+
+def select_unique_by_key(
+    meta: pd.DataFrame,
+    ranked_idx: Iterable[int],
+    key_fn: Callable[[str], str],
+    k: int,
+) -> List[int]:
+    """
+    Walk the ranked indices and keep the first occurrence per canonical title.
+    Returns up to k indices from `ranked_idx` preserving order.
+    """
+    seen = set()
+    out: List[int] = []
+    for idx in ranked_idx:
+        t = meta.iloc[idx]["title"]
+        key = key_fn(t)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(idx)
+        if len(out) >= k:
+            break
+    return out
+
 
 # ---------- Metadata features ----------
 def _minmax(x: np.ndarray) -> np.ndarray:
@@ -256,14 +314,22 @@ def find_similar_books(
     if exclude_self:
         mask[row] = False
 
-    # Top-k
+    # Rank all passing candidates
     idx = np.argwhere(mask).ravel()
-    top_idx = idx[np.argsort(final[idx])[::-1][:k]]
+    ranked = idx[np.argsort(final[idx])[::-1]]   # descending by score
 
-    # Build result frame
-    out = data["meta"].iloc[top_idx].copy()
-    out["score"] = final[top_idx]
-    out["similarity"] = sim[top_idx]
+    # Over-fetch to have room after dedup
+    overfetch = ranked[: max(200, 10*k)]
+
+    # Keep first occurrence per canonical title
+    unique_top = select_unique_by_key(
+        data["meta"], overfetch, key_fn=canonical_title, k=k
+    )
+
+    out = data["meta"].iloc[unique_top].copy()
+    out["score"] = final[unique_top]
+    out["similarity"] = sim[unique_top]
+    
     out = out[["book_id", "title", "score", "similarity", "average_rating", "publication_year", "n_reviews", "sum_n_votes"]]
     return out.reset_index(drop=True)
 
