@@ -28,7 +28,10 @@ def load_vectors_and_meta():
     desc_embs   = np.load(desc_path, mmap_mode="r")
     review_embs = np.load(review_path, mmap_mode="r")
     meta = pd.read_parquet(meta_path)
-
+    meta = meta.copy()
+    meta["_canon_title"] = meta["title"].apply(canonical_title)
+    meta["_ascii_ratio"] = meta["title"].apply(ascii_ratio)
+    
     # Basic checks
     n = len(meta)
     assert title_embs.shape[0] == n,  f"title rows {title_embs.shape[0]} != meta {n}"
@@ -41,7 +44,7 @@ def load_vectors_and_meta():
         "title": title_embs,
         "description": desc_embs,
         "reviews": review_embs,
-        "meta": meta,
+        "meta": meta,   # <- now includes _canon_title and _ascii_ratio
         "dim": dim,
         "n": n,
     }
@@ -134,6 +137,13 @@ def canonical_title(title: str) -> str:
     s = _punct_re.sub(" ", s)
     s = _multi_space_re.sub(" ", s)
     return s.strip()
+
+def ascii_ratio(s: str) -> float:
+    if not isinstance(s, str) or not s:
+        return 1.0
+    ascii_cnt = sum(1 for ch in s if ord(ch) < 128)
+    return ascii_cnt / max(1, len(s))
+
 
 def select_unique_by_key(
     meta: pd.DataFrame,
@@ -279,7 +289,10 @@ def find_similar_books(
     min_votes: int | None = None,
     min_rating: float | None = None,
     exclude_self: bool = True,
+    exclude_same_work: bool = True,      # NEW
+    same_language_as_seed: bool = True,  # NEW
 ):
+
     data = load_vectors_and_meta()
     meta = data["meta"].reset_index(drop=False)  # keep original row index as 'index'
     meta.rename(columns={"index": "_row"}, inplace=True)
@@ -311,8 +324,25 @@ def find_similar_books(
 
     # Apply filters
     mask = apply_filters(data["meta"], year_min=y_min, year_max=y_max, min_votes=v_min, min_rating=r_min)
+    # Exclude the seed row itself
     if exclude_self:
         mask[row] = False
+
+    # Exclude all editions/translations of the same work
+    if exclude_same_work:
+        seed_key = data["meta"].loc[row, "_canon_title"]
+        same_work = (data["meta"]["_canon_title"] == seed_key).to_numpy()
+        mask &= ~same_work
+
+    # Language heuristic filter
+    if same_language_as_seed:
+        seed_ascii = float(data["meta"].loc[row, "_ascii_ratio"])
+        seed_is_englishish = seed_ascii >= 0.90
+        if seed_is_englishish:
+            mask &= (data["meta"]["_ascii_ratio"].to_numpy() >= 0.90)
+        else:
+            mask &= (data["meta"]["_ascii_ratio"].to_numpy() < 0.90)
+
 
     # Rank all passing candidates
     idx = np.argwhere(mask).ravel()
