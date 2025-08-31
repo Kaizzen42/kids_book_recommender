@@ -6,6 +6,12 @@ from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
 from src.search import find_similar_books
 from fastapi.responses import JSONResponse
+from fastapi.responses import RedirectResponse, Response, HTMLResponse
+
+# For logging in just once instead of every time
+from fastapi import FastAPI, HTTPException, Query, Header, Request, Response, Form
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
+
 
 API_KEY = os.getenv("BOOKS_API_KEY")  # set via environment
 
@@ -65,3 +71,63 @@ def df_json_response(df: pd.DataFrame) -> JSONResponse:
                   int(x)   if isinstance(x, (np.integer,))  else x
     )
     return JSONResponse(content=safe.to_dict(orient="records"))
+
+
+@app.get("/", include_in_schema=False)
+def home():
+    # Send people to the interactive docs (Swagger UI)
+    return RedirectResponse(url="/docs")
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    # Return empty 204 so browsers stop retrying, keeps logs clean
+    return Response(status_code=204)
+
+@app.get("/login", response_class=HTMLResponse, include_in_schema=False)
+def login_form(request: Request, key: str | None = None):
+    """
+    GET /login?key=... → sets cookie & redirects to /docs (one-time magic link)
+    GET /login          → shows a tiny form to enter the key once
+    """
+    if key:
+        # Set cookie then bounce to docs
+        resp = RedirectResponse(url="/docs", status_code=302)
+        if not API_KEY or key != API_KEY:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        resp.set_cookie(
+            key="api_key",
+            value=key,
+            httponly=True,
+            samesite="lax",
+            secure=True,           # browser sees https on ngrok → set True
+            max_age=60*60*24*30,   # 30 days
+        )
+        return resp
+
+    # Show a minimal login form
+    return HTMLResponse("""
+<!doctype html><html><head><meta charset="utf-8"><title>Login</title>
+<style>body{font-family:sans-serif;max-width:480px;margin:3rem auto}</style></head>
+<body>
+  <h3>Enter API Key</h3>
+  <form method="post" action="/login">
+    <input type="password" name="key" placeholder="API key" style="width:100%;padding:.6rem" />
+    <button style="margin-top:1rem;padding:.6rem 1rem">Login</button>
+  </form>
+</body></html>
+""")
+
+@app.post("/login", include_in_schema=False)
+def login_post(key: str = Form(...)):
+    if not API_KEY or key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    resp = RedirectResponse(url="/docs", status_code=302)
+    resp.set_cookie(
+        key="api_key",
+        value=key,
+        httponly=True,
+        samesite="lax",
+        secure=True,             # https via ngrok
+        max_age=60*60*24*30,
+    )
+    return resp

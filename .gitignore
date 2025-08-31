@@ -4,3 +4,4 @@ data/
 goodreads_interactions_children.json
 trace.txt
 */__pycache__/*
+.env
