@@ -50,4 +50,4 @@ echo "[serve] ngrok window opened. Tip: local web UI at http://127.0.0.1:4040 sh
 
 # -------- start FastAPI (foreground) --------
 python -m uvicorn src.server:app --host "$SERVER_HOST" --port "$SERVER_PORT" --reload
-
+echo "BOOKS_API_KEY:$len(BOOKS_API_KEY)"
